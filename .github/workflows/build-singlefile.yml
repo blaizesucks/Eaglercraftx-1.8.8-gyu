@@ -1,4 +1,4 @@
-name: Build Single-File Eaglercraft (from 3 parts)
+name: Build Single-File Eaglercraft
 
 on:
   workflow_dispatch: {}
@@ -6,43 +6,39 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Reassemble original repo zip
+      - name: Verify split parts exist
         run: |
-          ls -l
+          ls -lh eagler-part*.zip
+
+      - name: Reassemble and extract source
+        run: |
           cat eagler-part1.zip eagler-part2.zip eagler-part3.zip > source.zip
           unzip -q source.zip -d src
-          echo "Reassembled and extracted."
 
-      - name: Show extracted top-level
-        run: |
-          ls -la src | sed -n '1,120p'
-
-      - name: Locate repo root inside extracted zip
+      - name: Find repo root
         id: findroot
         run: |
           set -e
           ROOT=$(find src -maxdepth 2 -type d -name "Eaglercraftx-1.8.8-gyu-main" -print -quit)
           if [ -z "$ROOT" ]; then
-            # fallback: pick first dir in src
             ROOT=$(find src -maxdepth 1 -mindepth 1 -type d -print -quit)
           fi
-          echo "ROOT=$ROOT" | tee -a $GITHUB_OUTPUT
+          echo "ROOT=$ROOT" >> $GITHUB_OUTPUT
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v3
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
-      - name: Set up Node 18 (for packing step)
-        uses: actions/setup-node@v4
+      - name: Set up Node 18
+        uses: actions/setup-node@v3
         with:
-          node-version: "18"
+          node-version: '18'
 
       - name: Make build script executable
         run: |
@@ -56,48 +52,147 @@ jobs:
           elif [ -f ./CompileLatestClient.bat ]; then
             bash ./CompileLatestClient.bat
           else
-            echo "Build script not found. Please ensure CompileLatestClient.sh/.bat exists." >&2
+            echo "Compile script not found (CompileLatestClient.sh/.bat)" >&2
             exit 1
           fi
 
-      - name: Verify build output
+      - name: Locate build output
         id: findbuild
         run: |
           set -e
           BUILD_DIR=$(find "${{ steps.findroot.outputs.ROOT }}" -type f -name index.html -path "*/build/*" -print -quit | xargs -r dirname)
-          if [ -z "$BUILD_DIR" ]; then
-            echo "No index.html under build/. Build may have failed." >&2
-            exit 1
-          fi
-          echo "BUILD_DIR=$BUILD_DIR" | tee -a $GITHUB_OUTPUT
+          test -n "$BUILD_DIR"
+          echo "BUILD_DIR=$BUILD_DIR" >> $GITHUB_OUTPUT
+          echo "Build dir is: $BUILD_DIR"
 
       - name: Create single-file packer
         run: |
           cat > make-singlefile.js << 'EOF'
           const fs = require('fs');
           const path = require('path');
-          function guessMime(f){const e=f.toLowerCase().split('.').pop();const m={js:'text/javascript',json:'application/json',html:'text/html',css:'text/css',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',mp3:'audio/mpeg',ogg:'audio/ogg',wav:'audio/wav',mp4:'video/mp4',wasm:'application/wasm',epk:'application/octet-stream',zip:'application/zip',pak:'application/octet-stream'};return m[e]||'application/octet-stream';}
-          function walk(root){const out=[];(function go(d){for(const n of fs.readdirSync(d)){const p=path.join(d,n);const st=fs.statSync(p);if(st.isDirectory())go(p);else out.push({abs:p,rel:path.relative(root,p).replace(/\\/g,'/')});}})(root);return out;}
-          function toB64(f){return fs.readFileSync(f).toString('base64');}
-          function inlineClasses(html,dir){const p=path.join(dir,'classes.js');if(fs.existsSync(p)){const js=fs.readFileSync(p,'utf8');const tag=/<script[^>]*src=["'][^"']*classes\.js["'][^>]*>\s*<\/script>/i;return tag.test(html)?html.replace(tag,`<script>\n${js}\n</script>`):html.replace(/<\/body>/i,`<script>\n${js}\n</script></body>`);}return html;}
-          function inject(html,map){const rt=`<script>(function(){try{const A=${JSON.stringify({})};Object.assign(A,map);const M=new Map();for(const k in A)M.set(k,A[k]);for(const k in A){const b=k.split('/').pop();if(!M.has(b))M.set(b,A[k]);}const _f=window.fetch.bind(window);window.fetch=async function(i,n){const u=(typeof i==='string')?i:i.url;const key=u.replace(/^\\.?\\//,'').replace(/^.*?:\\/\\//,'');const h=M.get(key)||M.get(key.split('/').pop());if(h){const bin=Uint8Array.from(atob(h.data),c=>c.charCodeAt(0));return new Response(bin,{status:200,headers:{'Content-Type':h.mime}});}return _f(i,n);};const _o=XMLHttpRequest.prototype.open,_s=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.open=function(m,u){this._u=u;return _o.apply(this,arguments);};XMLHttpRequest.prototype.send=function(b){const k=(this._u||'').replace(/^\\.?\\//,'').replace(/^.*?:\\/\\//,'');const h=M.get(k)||M.get(k.split('/').pop());if(h){const bin=Uint8Array.from(atob(h.data),c=>c.charCodeAt(0));const blob=new Blob([bin],{type:h.mime});const fr=new FileReader();fr.onload=()=>{Object.defineProperty(this,'response',{value:fr.result});Object.defineProperty(this,'responseText',{value:fr.result});Object.defineProperty(this,'status',{value:200});Object.defineProperty(this,'readyState',{value:4});this.onreadystatechange&&this.onreadystatechange();this.onload&&this.onload();};if(h.mime.startsWith('application/')||h.mime.startsWith('audio/')||h.mime.startsWith('video/'))fr.readAsArrayBuffer(blob);else fr.readAsText(blob);return;}return _s.apply(this,arguments);};}catch(e){console.error(e);}})();</script>`;const i=html.lastIndexOf('</body>');return i===-1?html+rt:html.slice(0,i)+rt+html.slice(i);}
-          const args=process.argv.slice(2);let inDir=null,outFile=null;for(let i=0;i<args.length;i++){if(args[i]==='-i')inDir=args[++i];else if(args[i]==='-o')outFile=args[++i];}
-          if(!inDir||!outFile){console.error('Usage: node make-singlefile.js -i <inputDir> -o <output.html>');process.exit(1);}
-          inDir=path.resolve(inDir);const idx=['index.html','Index.html','INDEX.HTML'].map(n=>path.join(inDir,n)).find(fs.existsSync);if(!idx){console.error('index.html not found in',inDir);process.exit(2);}
-          let html=fs.readFileSync(idx,'utf8');html=inlineClasses(html,inDir);
-          const files=walk(inDir).filter(f=>!/^(index\.html|classes\.js)$/i.test(f.rel));const map={};for(const f of files){const mime=guessMime(f.rel);const b64=toB64(f.abs);map[f.rel]={mime,data:b64};const base=require('path').basename(f.rel);if(!map[base])map[base]={mime,data:b64};}
-          const doc='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Eaglercraft 1.8.8 — Standalone</title></head><body>'+html+'</body></html>';
-          const out=inject(doc,map);fs.writeFileSync(outFile,out,'utf8');console.log('Wrote',outFile,(fs.statSync(outFile).size/1024/1024).toFixed(1)+' MB');
+
+          function guessMime(f){
+            const e = f.toLowerCase().split('.').pop();
+            const m = {js:'text/javascript',json:'application/json',html:'text/html',css:'text/css',
+              png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',
+              mp3:'audio/mpeg',ogg:'audio/ogg',wav:'audio/wav',mp4:'video/mp4',wasm:'application/wasm',
+              epk:'application/octet-stream',zip:'application/zip',pak:'application/octet-stream'};
+            return m[e] || 'application/octet-stream';
+          }
+          function walk(root){
+            const out=[]; (function go(d){
+              for(const n of fs.readdirSync(d)){
+                const p=path.join(d,n); const st=fs.statSync(p);
+                if(st.isDirectory()) go(p); else out.push({abs:p, rel:path.relative(root,p).replace(/\\/g,'/')});
+              }
+            })(root); return out;
+          }
+          function toB64(file){ return fs.readFileSync(file).toString('base64'); }
+
+          function inlineClasses(indexHtml, dir){
+            const p = path.join(dir,'classes.js');
+            if(fs.existsSync(p)){
+              const js = fs.readFileSync(p,'utf8');
+              const tag = /<script[^>]*src=["'][^"']*classes\.js["'][^>]*>\s*<\/script>/i;
+              return tag.test(indexHtml)
+                ? indexHtml.replace(tag, `<script>\n${js}\n</script>`)
+                : indexHtml.replace(/<\/body>/i, `<script>\n${js}\n</script></body>`);
+            }
+            return indexHtml;
+          }
+
+          function injectRuntime(html, assetMap){
+            const runtime = `<script>(function(){
+              try{
+                const ASSETS=${JSON.stringify({})}; Object.assign(ASSETS, assetMap);
+                const map=new Map();
+                for(const k in ASSETS) map.set(k,ASSETS[k]);
+                for(const k in ASSETS){ const b=k.split('/').pop(); if(!map.has(b)) map.set(b,ASSETS[k]); }
+
+                const _fetch=window.fetch.bind(window);
+                window.fetch=async function(i,n){
+                  const u=(typeof i==='string')?i:i.url;
+                  const key=u.replace(/^\\.?\\//,'').replace(/^.*?:\\/\\//,'');
+                  const hit=map.get(key)||map.get(key.split('/').pop());
+                  if(hit){
+                    const bin=Uint8Array.from(atob(hit.data),c=>c.charCodeAt(0));
+                    return new Response(bin,{status:200,headers:{'Content-Type':hit.mime}});
+                  }
+                  return _fetch(i,n);
+                };
+
+                const _open=XMLHttpRequest.prototype.open, _send=XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open=function(m,u){ this._u=u; return _open.apply(this,arguments); };
+                XMLHttpRequest.prototype.send=function(b){
+                  const k=(this._u||'').replace(/^\\.?\\//,'').replace(/^.*?:\\/\\//,'');
+                  const hit=map.get(k)||map.get(k.split('/').pop());
+                  if(hit){
+                    const bin=Uint8Array.from(atob(hit.data),c=>c.charCodeAt(0));
+                    const blob=new Blob([bin],{type:hit.mime});
+                    const fr=new FileReader();
+                    fr.onload=()=>{
+                      Object.defineProperty(this,'response',{value:fr.result});
+                      Object.defineProperty(this,'responseText',{value:fr.result});
+                      Object.defineProperty(this,'status',{value:200});
+                      Object.defineProperty(this,'readyState',{value:4});
+                      this.onreadystatechange&&this.onreadystatechange();
+                      this.onload&&this.onload();
+                    };
+                    if(hit.mime.startsWith('application/')||hit.mime.startsWith('audio/')||hit.mime.startsWith('video/')) fr.readAsArrayBuffer(blob);
+                    else fr.readAsText(blob);
+                    return;
+                  }
+                  return _send.apply(this,arguments);
+                };
+              }catch(e){ console.error(e); }
+            })();</script>`;
+            const i = html.lastIndexOf('</body>');
+            return i === -1 ? html + runtime : html.slice(0,i) + runtime + html.slice(i);
+          }
+
+          function main(){
+            const args = process.argv.slice(2);
+            let inDir=null, outFile=null;
+            for(let i=0;i<args.length;i++){
+              if(args[i]==='-i') inDir=args[++i];
+              else if(args[i]==='-o') outFile=args[++i];
+            }
+            if(!inDir || !outFile){
+              console.error('Usage: node make-singlefile.js -i <inputDir> -o <output.html>');
+              process.exit(1);
+            }
+            inDir = require('path').resolve(inDir);
+            const indexPath = ['index.html','Index.html','INDEX.HTML'].map(n=>require('path').join(inDir,n)).find(f=>fs.existsSync(f));
+            if(!indexPath){ console.error('index.html not found in', inDir); process.exit(2); }
+            let indexHtml = fs.readFileSync(indexPath,'utf8');
+            indexHtml = inlineClasses(indexHtml, inDir);
+
+            const files = walk(inDir).filter(f => !/^(index\.html|classes\.js)$/i.test(f.rel));
+            const assetMap = {};
+            for(const f of files){
+              const mime = guessMime(f.rel);
+              const b64 = toB64(f.abs);
+              assetMap[f.rel] = { mime, data: b64 };
+              const base = require('path').basename(f.rel);
+              if(!assetMap[base]) assetMap[base] = { mime, data: b64 };
+            }
+
+            const doc = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Eaglercraft 1.8.8 — Standalone</title></head><body>' + indexHtml + '</body></html>';
+            const finalHtml = injectRuntime(doc, assetMap);
+            fs.writeFileSync(outFile, finalHtml, 'utf8');
+            console.log('Wrote', outFile, (fs.statSync(outFile).size/1024/1024).toFixed(1)+' MB');
+          }
+
+          main();
           EOF
 
-      - name: Pack to single-file HTML
+      - name: Pack to single HTML
         run: |
           mkdir -p single
           node make-singlefile.js -i "${{ steps.findbuild.outputs.BUILD_DIR }}" -o "single/index.html"
 
-      - name: Upload single-file
-        uses: actions/upload-artifact@v4
+      - name: Upload single file
+        uses: actions/upload-artifact@v3
         with:
           name: eagler-1.8.8-single
           path: single/index.html
-          if-no-files-found: error
