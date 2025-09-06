@@ -1,8 +1,8 @@
-name: Build EaglercraftX HTML
+name: Build EaglercraftX 1.8.8 Custom Client
 
 on:
-  workflow_dispatch:
-  push:
+  workflow_dispatch:  # Allows you to manually trigger builds
+  push:              # Also builds when you push changes
     branches:
       - main
 
@@ -11,37 +11,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      # 1. Checkout your repository
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-      - name: Set up Java
+      # 2. Set up Java 17 (TeaVM + BuildTools require Java 17)
+      - name: Set up Java 17
         uses: actions/setup-java@v3
         with:
+          java-version: "17"
           distribution: "temurin"
-          java-version: 17
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y zip unzip
-
-      - name: Compile Java files
+      # 3. Run BuildTools to create standalone HTML
+      - name: Build Standalone Client
         run: |
-          mkdir -p build/classes
-          javac -d build/classes $(find src -name "*.java")
+          cd buildtools
+          java -jar BuildTools.jar --makeStandalone
+          cd ..
 
-      - name: Package into JAR
-        run: |
-          mkdir -p build/jar
-          jar --create --file build/jar/eaglercraft.jar -C build/classes .
-
-      - name: Build standalone HTML
-        run: |
-          mkdir -p build/output
-          cp web/index.html build/output/index.html
-          cp web/* build/output/ || true
-          cp build/jar/eaglercraft.jar build/output/eaglercraft.jar
-
-      - name: Upload final build
-        uses: actions/upload-artifact@v4
+      # 4. Upload the compiled HTML as an artifact
+      - name: Upload Standalone Build
+        uses: actions/upload-artifact@v3
         with:
-          name: eaglercraft-standalone
-          path: build/output
+          name: EaglercraftX-Standalone
+          path: buildtools/output/*
