@@ -3,48 +3,221 @@ name: Build EaglercraftX 1.8.8 Standalone
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout repository
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Set up Java 17 (required for BuildTools)
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
-      # 3. Build standalone HTML client
-      - name: Build standalone client
+      - name: Set up Node 18 (for single-file packing)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Make scripts executable (if present)
         run: |
+          chmod +x CompileLatestClient.sh || true
+          chmod +x buildtools/*.sh || true
+
+      # Try a series of common BuildTools CLI invocations (different forks use different flags)
+      - name: Compile client via BuildTools
+        run: |
+          set -e
           cd buildtools
-          java -jar BuildTools.jar --make client --teavm --offline
+
+          echo ">>> Attempt 1: --make client --teavm --offline"
+          (java -jar BuildTools.jar --make client --teavm --offline) || true
+
+          echo ">>> Attempt 2: --make latest-client --teavm --offline"
+          if [ ! -f latest-client/index.html ]; then
+            (java -jar BuildTools.jar --make latest-client --teavm --offline) || true
+          fi
+
+          echo ">>> Attempt 3: --workspace workspace --pull --clean --teavm --client"
+          if [ ! -f latest-client/index.html ]; then
+            (java -jar BuildTools.jar --workspace workspace --pull --clean --teavm --client) || true
+          fi
+
+          echo ">>> Attempt 4: --make client --offline"
+          if [ ! -f latest-client/index.html ]; then
+            (java -jar BuildTools.jar --make client --offline) || true
+          fi
+
+          echo ">>> Attempt 5: run CompileLatestClient.sh (some forks wrap BuildTools)"
           cd ..
+          if [ ! -f buildtools/latest-client/index.html ] && [ -f ./CompileLatestClient.sh ]; then
+            ./CompileLatestClient.sh || true
+          fi
 
-      # 4. Verify output location
-      - name: List output files
+      - name: Locate build output (index.html)
+        id: locate
         run: |
-          echo "=== Checking buildtools directory ==="
-          ls -R buildtools || true
-          echo "=== Checking root directory ==="
-          ls -R . || true
+          set -e
+          # Search likely locations for a built index.html
+          FOUND="$(find buildtools -type f -name index.html -not -path '*/node_modules/*' | head -n 1 || true)"
+          if [ -z "$FOUND" ]; then
+            FOUND="$(find . -type f -name index.html -not -path '*/node_modules/*' -not -path '*/.git/*' | head -n 1 || true)"
+          fi
 
-      # 5. Upload built files as artifact
-      - name: Upload standalone client
+          if [ -z "$FOUND" ]; then
+            echo "No index.html found. Dumping tree for debugging:"
+            (ls -R buildtools || true)
+            (ls -R . || true)
+            exit 1
+          fi
+
+          echo "build_dir=$(dirname "$FOUND")" >> "$GITHUB_OUTPUT"
+          echo "Found build dir: $(dirname "$FOUND")"
+
+      - name: List build directory
+        run: |
+          echo "=== Build directory ==="
+          echo "${{ steps.locate.outputs.build_dir }}"
+          ls -la "${{ steps.locate.outputs.build_dir }}"
+          echo "=== Peek a few parent dirs ==="
+          ls -la "$(dirname "${{ steps.locate.outputs.build_dir }}")" || true
+
+      - name: Write packer script (make-singlefile.js)
+        run: |
+          cat > make-singlefile.js << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          function guessMime(f){
+            const e = f.toLowerCase().split('.').pop();
+            const m = {
+              js:'text/javascript',json:'application/json',html:'text/html',css:'text/css',
+              png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',
+              mp3:'audio/mpeg',ogg:'audio/ogg',wav:'audio/wav',mp4:'video/mp4',wasm:'application/wasm',
+              epk:'application/octet-stream',zip:'application/zip',pak:'application/octet-stream'
+            };
+            return m[e] || 'application/octet-stream';
+          }
+          function walk(root){
+            const out=[];
+            (function go(d){
+              for(const n of fs.readdirSync(d)){
+                const p=path.join(d,n);
+                const st=fs.statSync(p);
+                if(st.isDirectory()) go(p);
+                else out.push({abs:p, rel:path.relative(root,p).replace(/\\/g,'/')});
+              }
+            })(root);
+            return out;
+          }
+          const args = process.argv.slice(2);
+          let inDir=null, outFile=null;
+          for(let i=0;i<args.length;i++){
+            if(args[i]==='-i') inDir=args[++i];
+            else if(args[i]==='-o') outFile=args[++i];
+          }
+          if(!inDir || !outFile){ console.error('Usage: node make-singlefile.js -i <inputDir> -o <output.html>'); process.exit(1); }
+          inDir = path.resolve(inDir);
+          const indexPath = path.join(inDir,'index.html');
+          if(!fs.existsSync(indexPath)){ console.error('index.html not found in', inDir); process.exit(2); }
+          let indexHtml = fs.readFileSync(indexPath,'utf8');
+
+          // Inline classes.js if referenced
+          const classesPath = path.join(inDir,'classes.js');
+          if(fs.existsSync(classesPath)){
+            const classesJs = fs.readFileSync(classesPath,'utf8');
+            indexHtml = indexHtml.replace(/<script[^>]*src=["'][^"']*classes\.js["'][^>]*><\/script>/i,
+              `<script>\n${classesJs}\n</script>`);
+          }
+
+          // Gather all other assets and map them for fetch/XMLHttpRequest overrides
+          const files = walk(inDir).filter(f => f.rel !== 'index.html' && f.rel !== 'classes.js');
+          const assetMap = {};
+          for(const f of files){
+            const mime = guessMime(f.rel);
+            const b64 = fs.readFileSync(f.abs).toString('base64');
+            assetMap[f.rel] = { mime, data: b64 };
+            const base = path.basename(f.rel);
+            if(!assetMap[base]) assetMap[base] = { mime, data: b64 };
+          }
+
+          function inject(html, assetMap){
+            const runtime =
+`<script>(function(){
+  const ASSETS=${JSON.stringify(assetMap)};
+  const _fetch=window.fetch.bind(window);
+  const byKey=new Map(Object.entries(ASSETS));
+  for(const k of Object.keys(ASSETS)){ const b=k.split('/').pop(); if(!byKey.has(b)) byKey.set(b,ASSETS[k]); }
+  window.fetch=async function(i,n){ try{
+    const u=typeof i==='string'?i:i.url;
+    const k=u.replace(/^\\.?\\//,'').replace(/^.*?:\\/\\//,'');
+    const hit=(byKey.get(k)||byKey.get(k.split('/').pop()));
+    if(hit){
+      const bin=Uint8Array.from(atob(hit.data),c=>c.charCodeAt(0));
+      return new Response(bin,{status:200,headers:{'Content-Type':hit.mime}});
+    }
+  }catch(e){} return _fetch(i,n); };
+
+  const XO=XMLHttpRequest.prototype.open, XS=XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open=function(m,u,a,us,p){ this._u=u; return XO.apply(this,arguments); };
+  XMLHttpRequest.prototype.send=function(b){
+    try{
+      const k=(this._u||'').replace(/^\\.?\\//,'').replace(/^.*?:\\/\\//,'');
+      const hit=(byKey.get(k)||byKey.get(k.split('/').pop()));
+      if(hit){
+        const bin=Uint8Array.from(atob(hit.data),c=>c.charCodeAt(0));
+        const blob=new Blob([bin],{type:hit.mime});
+        const fr=new FileReader();
+        fr.onload=()=>{ Object.defineProperty(this,'response',{value:fr.result});
+          Object.defineProperty(this,'responseText',{value:fr.result});
+          Object.defineProperty(this,'status',{value:200});
+          Object.defineProperty(this,'readyState',{value:4});
+          this.onreadystatechange&&this.onreadystatechange(); this.onload&&this.onload(); };
+        fr.readAsArrayBuffer(blob);
+        return;
+      }
+    }catch(e){}
+    return XS.apply(this,arguments);
+  };
+})();</script>`;
+
+            const i = html.lastIndexOf('</body>');
+            return i === -1 ? html + runtime : html.slice(0,i) + runtime + html.slice(i);
+          }
+
+          const finalHtml = `<!doctype html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Eaglercraft 1.8.8 — Standalone</title>
+</head><body>
+${indexHtml}
+</body></html>`;
+          const out = inject(finalHtml, assetMap);
+          fs.writeFileSync(outFile, out, 'utf8');
+          console.log('Wrote', outFile, (fs.statSync(outFile).size/1024/1024).toFixed(1)+' MB');
+          EOF
+
+      - name: Pack to single index.html
+        run: |
+          OUT_DIR="$GITHUB_WORKSPACE/single"
+          mkdir -p "$OUT_DIR"
+          node make-singlefile.js -i "${{ steps.locate.outputs.build_dir }}" -o "$OUT_DIR/index.html"
+
+      - name: Upload raw build (whatever the jar produced)
         uses: actions/upload-artifact@v4
         with:
-          name: eaglercraftx-standalone
+          name: eaglercraftx-raw-build
           path: |
-            buildtools/latest-client/**
-            buildtools/output/**
-            buildtools/dist/**
-            **/index.html
-          if-no-files-found: warn
+            ${{ steps.locate.outputs.build_dir }}/**
+          if-no-files-found: error
+
+      - name: Upload single-file HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: eaglercraftx-single-file
+          path: single/index.html
+          if-no-files-found: error
