@@ -1,8 +1,8 @@
 name: Build EaglercraftX 1.8.8 Custom Client
 
 on:
-  workflow_dispatch:  # Allows you to manually trigger builds
-  push:              # Also builds when you push changes
+  workflow_dispatch:  # Manual trigger
+  push:
     branches:
       - main
 
@@ -11,16 +11,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout your repository
+      # 1. Checkout the repository
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # 2. Set up Java 17 (TeaVM + BuildTools require Java 17)
+      # 2. Set up Java 17 (required for TeaVM + BuildTools)
       - name: Set up Java 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
-          java-version: "17"
           distribution: "temurin"
+          java-version: "17"
 
       # 3. Run BuildTools to create standalone HTML
       - name: Build Standalone Client
@@ -29,9 +29,10 @@ jobs:
           java -jar BuildTools.jar --makeStandalone
           cd ..
 
-      # 4. Upload the compiled HTML as an artifact
+      # 4. Upload the compiled standalone build
       - name: Upload Standalone Build
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: EaglercraftX-Standalone
-          path: buildtools/output/*
+          path: buildtools/output/**
+          if-no-files-found: error
