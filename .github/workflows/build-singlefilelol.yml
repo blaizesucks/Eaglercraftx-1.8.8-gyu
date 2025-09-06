@@ -26,11 +26,25 @@ jobs:
       - name: Build standalone client
         run: |
           cd buildtools
-          java -jar BuildTools.jar --make latest-client --teavm --offline
+          java -jar BuildTools.jar --make client --teavm --offline
+          cd ..
 
-      # 4. Upload built files as artifact
+      # 4. Verify output location
+      - name: List output files
+        run: |
+          echo "=== Checking buildtools directory ==="
+          ls -R buildtools || true
+          echo "=== Checking root directory ==="
+          ls -R . || true
+
+      # 5. Upload built files as artifact
       - name: Upload standalone client
         uses: actions/upload-artifact@v4
         with:
           name: eaglercraftx-standalone
-          path: buildtools/latest-client/**
+          path: |
+            buildtools/latest-client/**
+            buildtools/output/**
+            buildtools/dist/**
+            **/index.html
+          if-no-files-found: warn
