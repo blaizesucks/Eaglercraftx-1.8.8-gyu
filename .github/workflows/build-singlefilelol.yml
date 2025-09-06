@@ -10,31 +10,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # STEP 1 — Checkout the repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # STEP 2 — Install Java 17
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # STEP 3 — Install Node.js for single-file packaging
       - name: Set up Node.js 18
         uses: actions/setup-node@v4
         with:
           node-version: "18"
 
+      # STEP 4 — Make scripts executable if needed
       - name: Make scripts executable
         run: |
           chmod +x CompileLatestClient.sh || true
           chmod +x buildtools/*.sh || true
 
+      # STEP 5 — Try to build the client using BuildTools
       - name: Compile client via BuildTools
         run: |
           set -e
           cd buildtools
 
-          echo ">>> Attempting BuildTools"
+          echo ">>> Attempting BuildTools..."
           if [ -f BuildTools.jar ]; then
             java -jar BuildTools.jar --make client --teavm --offline || \
             java -jar BuildTools.jar --make latest-client --teavm --offline || \
@@ -47,6 +52,7 @@ jobs:
             ./CompileLatestClient.sh || true
           fi
 
+      # STEP 6 — Locate built index.html
       - name: Locate build output
         id: locate
         run: |
@@ -60,7 +66,9 @@ jobs:
             exit 1
           fi
           echo "build_dir=$(dirname "$FOUND")" >> "$GITHUB_OUTPUT"
+          echo "Found build directory: $(dirname "$FOUND")"
 
+      # STEP 7 — Write JS packer for single-file HTML
       - name: Write packer script
         run: |
           cat > make-singlefile.js << 'EOF'
@@ -129,52 +137,22 @@ jobs:
           fs.writeFileSync(outFile, html);
           EOF
 
+      # STEP 8 — Create single standalone HTML file
       - name: Pack single index.html
         run: |
           mkdir -p single
           node make-singlefile.js -i "${{ steps.locate.outputs.build_dir }}" -o "single/index.html"
 
+      # STEP 9 — Upload raw build folder
       - name: Upload raw build
         uses: actions/upload-artifact@v4
         with:
           name: eaglercraftx-raw-build
           path: ${{ steps.locate.outputs.build_dir }}/**
 
+      # STEP 10 — Upload standalone HTML
       - name: Upload single-file HTML
         uses: actions/upload-artifact@v4
-name: Build EaglercraftX 1.8.8 Standalone
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      # STEP 1 — Checkout the repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # STEP 2 — Install Java 17
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: "17"
-
-      # STEP 3 — Install Node.js for single-file packaging
-      - name: Set up Node.js 18
-        uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-
-      # STEP 4 — Make scripts executable if needed
-      - name: Make scripts executable
-        run: |
-          chmod +x CompileLatestClient.sh || true
-          chmod +x buildtools/*.sh || true
-
-      # STEP 5 — Try to build the client using
+          name: eaglercraftx-single-file
+          path: single/index.html
